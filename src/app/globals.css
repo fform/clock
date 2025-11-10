@@ -1,26 +1,66 @@
+@config "../../tailwind.config.ts";
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  color-scheme: light;
+  --color-background: 220 18% 97%;
+  --color-surface: 220 22% 99%;
+  --color-surface-elevated: 220 20% 96%;
+  --color-surface-subtle: 220 25% 93%;
+  --color-border: 220 16% 85%;
+  --color-accent: 210 92% 46%;
+  --color-accent-muted: 210 82% 54%;
+  --color-accent-subtle: 210 95% 94%;
+  --color-success: 152 60% 42%;
+  --color-warning: 42 95% 54%;
+  --color-danger: 2 78% 55%;
+  --color-on-primary: 0 0% 100%;
+  --color-on-surface: 222 47% 11%;
+  --color-on-muted: 222 16% 45%;
+  --radius-base: 14px;
+  --header-height: 64px;
+  --sidebar-width: 240px;
+  --font-display: "Satoshi Variable", var(--font-geist-sans, system-ui);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    color-scheme: dark;
+    --color-background: 222 47% 7%;
+    --color-surface: 222 41% 9%;
+    --color-surface-elevated: 222 36% 12%;
+    --color-surface-subtle: 222 32% 18%;
+    --color-border: 222 26% 24%;
+    --color-accent: 194 100% 68%;
+    --color-accent-muted: 194 95% 60%;
+    --color-accent-subtle: 194 100% 20%;
+    --color-success: 150 70% 45%;
+    --color-warning: 38 95% 64%;
+    --color-danger: 354 85% 62%;
+    --color-on-primary: 222 47% 11%;
+    --color-on-surface: 216 33% 92%;
+    --color-on-muted: 216 20% 65%;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-on-surface antialiased;
+  }
+
+  ::selection {
+    background-color: hsl(var(--color-accent) / 0.15);
+  }
+
+  a {
+    @apply text-accent transition-colors duration-150 ease-brand;
+  }
+
+  a:hover {
+    @apply text-accent-muted;
+  }
 }
