@@ -68,7 +68,8 @@ export function ChannelDeviceAssignments({
     onChange(newMap);
   };
 
-  const getDeviceName = (deviceId: string): string => {
+  const getDeviceName = (deviceId: string | undefined): string => {
+    if (!deviceId) return "Unknown Device";
     const device = devices.find((d) => d.id === deviceId);
     return device ? `${device.manufacturer} ${device.model}` : deviceId;
   };

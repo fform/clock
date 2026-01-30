@@ -100,7 +100,7 @@ export function PartialDetail({ partial }: PartialDetailProps) {
     setDraft((current) => ({
       ...current,
       commands: current.commands.map((cmd, i) =>
-        i === index ? { ...cmd, ...updated } : cmd
+        i === index ? { ...cmd, ...updated } as MidiCCStep | MidiPCStep | MidiCustomStep : cmd
       ),
     }));
     setIsEditing(true);
