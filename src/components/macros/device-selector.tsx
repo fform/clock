@@ -1,12 +1,8 @@
 "use client";
 
 import { useMemo, useState, useEffect } from "react";
-import { Search } from "lucide-react";
-import { useClockStore } from "@/lib/store";
 import { getRecentDevices, addRecentDevice } from "@/lib/midi/templates/recent-devices";
-import { getAllTemplates, getTemplateById } from "@/lib/midi/templates";
-import { loadOpenMidiTemplates } from "@/lib/midi/templates";
-import type { MidiDeviceTemplate } from "@/lib/domain/midi";
+import { getAllTemplates, loadDeviceList, type DeviceInfo } from "@/lib/midi/templates";
 
 type DeviceSelectorProps = {
   value?: string;
@@ -15,27 +11,37 @@ type DeviceSelectorProps = {
 };
 
 export function DeviceSelector({ value, onChange, className }: DeviceSelectorProps) {
-  const templates = useClockStore((state) => state.templates);
-  const registerTemplates = useClockStore((state) => state.registerTemplates);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [allTemplates, setAllTemplates] = useState<MidiDeviceTemplate[]>(templates);
+  const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const recentDeviceIds = useMemo(() => getRecentDevices(), []);
 
-  // Load OpenMIDI templates on mount
+  // Load device list on mount (lightweight, single request)
   useEffect(() => {
     let mounted = true;
     
-    async function loadTemplates() {
+    async function loadDevices() {
       setIsLoading(true);
       try {
-        const openMidiTemplates = await loadOpenMidiTemplates();
+        // Load built-in templates
+        const builtInTemplates = getAllTemplates();
+        const builtInDevices: DeviceInfo[] = builtInTemplates.map((t) => ({
+          id: t.id,
+          manufacturer: t.manufacturer,
+          model: t.model,
+          hasTemplate: true,
+        }));
+
+        // Load OpenMIDI device list (just metadata, no template data)
+        const openMidiDevices = await loadDeviceList();
+        
         if (mounted) {
-          registerTemplates(openMidiTemplates);
-          setAllTemplates(getAllTemplates());
+          // Combine built-in and OpenMIDI devices
+          const allDevices = [...builtInDevices, ...openMidiDevices];
+          setDevices(allDevices);
         }
       } catch (error) {
-        console.error("Failed to load templates:", error);
+        console.error("Failed to load device list:", error);
       } finally {
         if (mounted) {
           setIsLoading(false);
@@ -43,43 +49,37 @@ export function DeviceSelector({ value, onChange, className }: DeviceSelectorPro
       }
     }
 
-    loadTemplates();
+    loadDevices();
 
     return () => {
       mounted = false;
     };
-  }, [registerTemplates]);
+  }, []);
 
-  // Update allTemplates when store templates change
-  useEffect(() => {
-    setAllTemplates(getAllTemplates());
-  }, [templates]);
-
-  const filteredTemplates = useMemo(() => {
+  const filteredDevices = useMemo(() => {
     if (!searchQuery.trim()) {
-      return allTemplates;
+      return devices;
     }
 
     const query = searchQuery.toLowerCase();
-    return allTemplates.filter(
-      (template) =>
-        template.manufacturer.toLowerCase().includes(query) ||
-        template.model.toLowerCase().includes(query) ||
-        template.id.toLowerCase().includes(query),
+    return devices.filter(
+      (device) =>
+        device.manufacturer.toLowerCase().includes(query) ||
+        device.model.toLowerCase().includes(query) ||
+        device.id.toLowerCase().includes(query),
     );
-  }, [allTemplates, searchQuery]);
+  }, [devices, searchQuery]);
 
-  // Separate recent and other templates
-  const recentTemplates = useMemo(() => {
-    return recentDeviceIds
-      .map((id) => getTemplateById(id))
-      .filter((t): t is MidiDeviceTemplate => t !== undefined);
-  }, [recentDeviceIds]);
-
-  const otherTemplates = useMemo(() => {
+  // Separate recent and other devices
+  const recentDevices = useMemo(() => {
     const recentIds = new Set(recentDeviceIds);
-    return filteredTemplates.filter((t) => !recentIds.has(t.id));
-  }, [filteredTemplates, recentDeviceIds]);
+    return devices.filter((d) => recentIds.has(d.id));
+  }, [devices, recentDeviceIds]);
+
+  const otherDevices = useMemo(() => {
+    const recentIds = new Set(recentDeviceIds);
+    return filteredDevices.filter((d) => !recentIds.has(d.id));
+  }, [filteredDevices, recentDeviceIds]);
 
   const handleDeviceChange = (deviceId: string) => {
     if (deviceId) {
@@ -90,11 +90,11 @@ export function DeviceSelector({ value, onChange, className }: DeviceSelectorPro
     }
   };
 
-  const selectedTemplate = value ? getTemplateById(value) : undefined;
+  const selectedDevice = value ? devices.find((d) => d.id === value) : undefined;
 
   return (
     <div className={className}>
-      <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-on-muted mb-2">
+      <label className="block text-xs font-semibold text-on-muted mb-2">
         Device Template
       </label>
       <div className="relative">
@@ -105,20 +105,20 @@ export function DeviceSelector({ value, onChange, className }: DeviceSelectorPro
           disabled={isLoading}
         >
           <option value="">No device selected</option>
-          {recentTemplates.length > 0 && (
+          {recentDevices.length > 0 && (
             <optgroup label="Recent">
-              {recentTemplates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.manufacturer} {template.model}
+              {recentDevices.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.manufacturer} {device.model}
                 </option>
               ))}
             </optgroup>
           )}
-          {otherTemplates.length > 0 && (
-            <optgroup label={recentTemplates.length > 0 ? "All Devices" : "Devices"}>
-              {otherTemplates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.manufacturer} {template.model}
+          {otherDevices.length > 0 && (
+            <optgroup label={recentDevices.length > 0 ? "All Devices" : "Devices"}>
+              {otherDevices.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.manufacturer} {device.model}
                 </option>
               ))}
             </optgroup>
@@ -130,9 +130,10 @@ export function DeviceSelector({ value, onChange, className }: DeviceSelectorPro
           </div>
         )}
       </div>
-      {selectedTemplate && (
+      {selectedDevice && (
         <p className="mt-1 text-xs text-on-muted">
-          {selectedTemplate.description || `${selectedTemplate.manufacturer} ${selectedTemplate.model}`}
+          {selectedDevice.manufacturer} {selectedDevice.model}
+          {selectedDevice.hasTemplate ? " (template available)" : ""}
         </p>
       )}
     </div>

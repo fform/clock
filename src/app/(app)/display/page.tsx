@@ -38,7 +38,7 @@ export default function DisplaySettingsPage() {
           <h2 className="text-lg font-semibold text-on-surface">Display controls</h2>
           <div className="mt-4 grid gap-4 text-sm text-on-surface">
             <label className="flex flex-col gap-2">
-              <span className="text-xs uppercase tracking-[0.3em] text-on-muted">
+              <span className="text-xs text-on-muted">
                 Screen brightness
               </span>
               <input
@@ -56,7 +56,7 @@ export default function DisplaySettingsPage() {
             </label>
 
             <label className="flex flex-col gap-2">
-              <span className="text-xs uppercase tracking-[0.3em] text-on-muted">
+              <span className="text-xs text-on-muted">
                 Tempo LED pulses
               </span>
               <input
@@ -74,7 +74,7 @@ export default function DisplaySettingsPage() {
             </label>
 
             <label className="flex flex-col gap-2">
-              <span className="text-xs uppercase tracking-[0.3em] text-on-muted">
+              <span className="text-xs text-on-muted">
                 Orientation
               </span>
               <select
@@ -113,7 +113,7 @@ function PreviewCard({
 }) {
   return (
     <div className="rounded-2xl border border-border/60 bg-surface p-6 shadow-subtle">
-      <h2 className="text-sm font-semibold uppercase tracking-[0.3em] text-on-muted">
+      <h2 className="text-sm font-semibold text-on-muted">
         Live preview
       </h2>
       <div className="mt-4 flex aspect-[3/2] items-center justify-center rounded-2xl border border-border/60 bg-surface-subtle">
@@ -125,7 +125,7 @@ function PreviewCard({
           }}
         >
           <div className="absolute inset-3 rounded-lg border border-dashed border-border/60" />
-          <span className="text-xs uppercase tracking-[0.3em] text-on-muted">
+          <span className="text-xs text-on-muted">
             Tempo pulses {pulses}
           </span>
         </div>

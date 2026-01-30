@@ -21,25 +21,49 @@ export class MidiService {
   constructor(private readonly options: MidiServiceOptions = { sysex: false }) {}
 
   async initialize() {
-    if (this.initialized || !isBrowser) {
+    if (this.initialized) {
       return;
     }
 
-    if (!navigator.requestMIDIAccess) {
-      throw new Error("WebMIDI is not available in this browser.");
+    if (!isBrowser) {
+      return;
     }
 
-    this.access = await navigator.requestMIDIAccess({
-      sysex: this.options.sysex ?? false,
-    });
+    // Check if navigator exists
+    if (typeof navigator === "undefined") {
+      throw new Error("WebMIDI is not available: navigator is undefined.");
+    }
 
-    this.access.addEventListener("statechange", () => {
+    // Check for requestMIDIAccess - must call it directly on navigator to preserve context
+    if (typeof navigator.requestMIDIAccess !== "function") {
+      throw new Error(
+        "WebMIDI is not available in this browser. The requestMIDIAccess API is not supported.",
+      );
+    }
+
+    try {
+      // Must call directly on navigator to avoid "Illegal invocation" error
+      this.access = await navigator.requestMIDIAccess({
+        sysex: this.options.sysex ?? false,
+      });
+
+      this.access.addEventListener("statechange", () => {
+        this.refreshPorts();
+      });
+
       this.refreshPorts();
-    });
-
-    this.refreshPorts();
-    this.emitPorts();
-    this.initialized = true;
+      this.emitPorts();
+      this.initialized = true;
+    } catch (error) {
+      // If requestMIDIAccess fails, it might be a permission issue or timing issue
+      // Re-throw with a more helpful message
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(
+        `Failed to access WebMIDI: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   getOutputs(): MidiPortSummary[] {

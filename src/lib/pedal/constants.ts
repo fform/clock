@@ -51,6 +51,7 @@ export const SETLIST_SECTION_COUNT = Math.ceil(
   MAX_SETLIST_SONGS / SETLIST_SECTION_SIZE,
 );
 export const MACRO_SLOT_COUNT = 128;
+export const MAX_MACRO_COMMANDS = 15; // Maximum number of commands per macro
 
 export const GLOBAL_BOOLEAN_KEYS = new Set([
   "met_accent",

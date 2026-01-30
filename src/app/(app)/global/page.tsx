@@ -1,15 +1,33 @@
 "use client";
 
-import { ChangeEvent } from "react";
+import { ChangeEvent, useCallback, useState } from "react";
+import { Download, Upload } from "lucide-react";
 
 import {
   globalSettingsSelector,
   useClockStore,
 } from "@/lib/store";
+import { Button } from "@/components/ui/button";
+import { ensurePedalBridge } from "@/lib/pedal/bridge";
+import { exportGlobalSettingsToDevice } from "@/lib/pedal/exporter";
+import { importSettingsFromPedal } from "@/lib/pedal/importer";
+import { ChannelDeviceAssignments } from "@/components/macros/channel-device-assignments";
+import type { MidiChannel } from "@/lib/domain/midi";
+
+const EMPTY_DEVICE_MAP: Record<number, string> = {};
 
 export default function GlobalSettingsPage() {
   const settings = useClockStore(globalSettingsSelector);
   const updateSettings = useClockStore((state) => state.updateGlobalSettings);
+  const clearGlobalsUnsynced = useClockStore((state) => state.clearGlobalsUnsynced);
+  const channelDeviceMap = useClockStore((state) => state.globalSettings.channelDeviceMap ?? EMPTY_DEVICE_MAP);
+  const updateChannelDeviceMap = useClockStore((state) => state.updateChannelDeviceMap);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
   const handleMetronomeChange = (
     event: ChangeEvent<HTMLInputElement | HTMLSelectElement>,
@@ -69,16 +87,84 @@ export default function GlobalSettingsPage() {
     });
   };
 
+  const handleSaveToDevice = useCallback(async () => {
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const bridge = await ensurePedalBridge();
+      await exportGlobalSettingsToDevice(bridge, settings);
+      setLastSavedAt(Date.now());
+      clearGlobalsUnsynced();
+      bridge.disconnect();
+    } catch (error) {
+      setSaveError(
+        error instanceof Error ? error.message : "Failed to save settings to device.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }, [settings, clearGlobalsUnsynced]);
+
+  const handleImportFromPedal = useCallback(async () => {
+    setIsImporting(true);
+    setImportError(null);
+    setImportSuccess(null);
+    try {
+      const result = await importSettingsFromPedal();
+      if (result.warnings.length > 0) {
+        setImportSuccess(`Imported settings with ${result.warnings.length} warnings`);
+      } else {
+        setImportSuccess(`Successfully imported all settings from device`);
+      }
+      setTimeout(() => setImportSuccess(null), 5000);
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : "Failed to import settings from device",
+      );
+    } finally {
+      setIsImporting(false);
+    }
+  }, []);
+
   return (
     <div className="space-y-8">
       <header>
-        <h1 className="text-3xl font-semibold tracking-tight text-on-surface">
-          Global settings
-        </h1>
-        <p className="mt-2 max-w-3xl text-on-muted">
-          Metronome, sync, and MIDI routing preferences mirror the Canvas Clock
-          hardware. Updates persist locally and will sync to the pedal once a device is connected.
-        </p>
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight text-on-surface">
+              Global settings
+            </h1>
+            <p className="mt-2 max-w-3xl text-on-muted">
+              Metronome, sync, and MIDI routing preferences mirror the Canvas Clock
+              hardware. Updates persist locally and will sync to the pedal once a device is connected.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<Upload className="size-4" />}
+              onClick={handleImportFromPedal}
+              disabled={isImporting}
+            >
+              {isImporting ? "Importing..." : "Import from Device"}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Download className="size-4" />}
+              onClick={handleSaveToDevice}
+              disabled={isSaving}
+            >
+              {isSaving ? "Saving…" : "Save to Device"}
+            </Button>
+          </div>
+        </div>
+        {(saveError || importError || importSuccess || lastSavedAt) && (
+          <p className={`mt-3 text-sm ${saveError || importError ? "text-danger" : importSuccess ? "text-success" : "text-on-muted"}`}>
+            {saveError || importError || importSuccess || `Last saved to device at ${new Date(lastSavedAt!).toLocaleTimeString()}`}
+          </p>
+        )}
       </header>
 
       <section className="grid gap-6 lg:grid-cols-2">
@@ -264,6 +350,24 @@ export default function GlobalSettingsPage() {
           </div>
         </Card>
       </section>
+
+      <section className="rounded-2xl border border-border/60 bg-surface p-6 shadow-subtle">
+        <h2 className="mb-2 text-lg font-semibold text-on-surface">
+          MIDI Channel Device Assignments
+        </h2>
+        <p className="mb-6 text-sm text-on-muted">
+          Assign MIDI devices to channels globally. These assignments will be used across all MIDI macros,
+          allowing the editor to show device-specific templates and command names.
+        </p>
+        <ChannelDeviceAssignments
+          channelDeviceMap={channelDeviceMap}
+          onChange={(map) => {
+            Object.entries(map).forEach(([channel, deviceId]) => {
+              updateChannelDeviceMap(Number(channel) as MidiChannel, deviceId);
+            });
+          }}
+        />
+      </section>
     </div>
   );
 }
@@ -295,7 +399,7 @@ function Field({
 }) {
   return (
     <label className="flex flex-col gap-2 text-sm text-on-surface">
-      <span className="text-xs uppercase tracking-[0.3em] text-on-muted">
+      <span className="text-xs text-on-muted">
         {label}
       </span>
       {children}

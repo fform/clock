@@ -29,6 +29,7 @@ import type {
   MidiMacro,
   MidiMacroInstance,
   MidiStep,
+  MidiPartial,
 } from "@/lib/domain/midi";
 import type { Setlist, Song, TimeSignature } from "@/lib/domain/project";
 import type { DisplaySettings, GlobalSettings } from "@/lib/domain/settings";
@@ -72,6 +73,7 @@ export type ImportProgress =
 export type ImportOptions = {
   onProgress?: (progress: ImportProgress) => void;
   preferredDeviceName?: string;
+  importAll?: boolean;
 };
 
 export type ImportResult = {
@@ -100,6 +102,287 @@ const DEFAULT_TIME_SIGNATURE_ID = 3; // 4/4
 
 const isHttpSuccess = (response: PedalResponse | unknown): response is PedalResponse =>
   !!response && typeof response === "object" && "status" in response;
+
+/**
+ * Import only MIDI macros from the pedal
+ */
+export async function importMacrosFromPedal(importAll = false): Promise<{ macros: MidiMacro[]; warnings: string[] }> {
+  const bridge = await ensurePedalBridge();
+  const warnings: string[] = [];
+  const macros: MidiMacro[] = [];
+  let consecutiveDefaults = 0;
+
+  for (let index = 0; index < MACRO_SLOT_COUNT; index += 1) {
+    try {
+      const nameResponse = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_MACRO_NAME,
+        index,
+      });
+
+      if (!isHttpSuccess(nameResponse) || nameResponse.status !== "success") {
+        continue;
+      }
+
+      const mapResponse = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_MACRO_MAP,
+        index,
+      });
+
+      if (!isHttpSuccess(mapResponse) || mapResponse.status !== "success") {
+        continue;
+      }
+
+      const activeSlots: number[] = Array.isArray(mapResponse.active_slots)
+        ? (mapResponse.active_slots as number[])
+        : [];
+      const steps: MidiStep[] = [];
+
+      for (const slot of activeSlots) {
+        try {
+          const commandResponse = await bridge.sendJsonCommand({
+            cmd: PedalCommand.GET_MACRO_COMMAND,
+            index,
+            slot,
+          });
+
+          if (isHttpSuccess(commandResponse) && commandResponse.status === "success") {
+            const step = mapMidiCommand(commandResponse, index, slot);
+            if (step) {
+              steps.push(step);
+            }
+          }
+        } catch (error) {
+          warnings.push(`Error loading macro ${index + 1} step ${slot + 1}: ${(error as Error).message}`);
+        }
+      }
+
+      const macro = mapMacroResponse(nameResponse, index, steps);
+      const isDefault = macro.steps.length === 0 && isDefaultMacroName(macro.name, index);
+      
+      if (!isDefault) {
+        macros.push(macro);
+        consecutiveDefaults = 0;
+      } else if (!importAll) {
+        consecutiveDefaults++;
+        // Stop if we've seen 5 consecutive default macros
+        if (consecutiveDefaults >= 5) {
+          break;
+        }
+      } else {
+        macros.push(macro);
+      }
+    } catch (error) {
+      warnings.push(`Error loading macro ${index + 1}: ${(error as Error).message}`);
+    }
+  }
+
+  bridge.disconnect();
+
+  // Replace command sequences with partial references where possible
+  const partials = useClockStore.getState().partials;
+  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, partials));
+
+  // Merge with existing macros
+  useClockStore.setState((state) => ({
+    macros: optimizedMacros,
+    unsyncedMacroIds: [],
+  }));
+
+  return { macros, warnings };
+}
+
+/**
+ * Import only songs from the pedal
+ */
+export async function importSongsFromPedal(importAll = false): Promise<{ songs: Song[]; warnings: string[] }> {
+  const bridge = await ensurePedalBridge();
+  const warnings: string[] = [];
+  const songs: Song[] = [];
+  let consecutiveDefaults = 0;
+
+  for (let index = 0; index < SONG_SLOT_COUNT; index += 1) {
+    try {
+      const response = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_SONG_DETAILS,
+        index,
+      });
+
+      if (isHttpSuccess(response) && response.status === "success") {
+        const song = mapSongResponse(response, index);
+        const isUsed = isSongUsed(song);
+        
+        if (isUsed) {
+          songs.push(song);
+          consecutiveDefaults = 0;
+        } else if (!importAll) {
+          consecutiveDefaults++;
+          // Stop if we've seen 5 consecutive default songs
+          if (consecutiveDefaults >= 5) {
+            break;
+          }
+        } else {
+          songs.push(song);
+        }
+      }
+    } catch (error) {
+      warnings.push(`Error loading song ${index + 1}: ${(error as Error).message}`);
+    }
+  }
+
+  bridge.disconnect();
+
+  // Merge with existing songs
+  useClockStore.setState((state) => ({
+    songs,
+    unsyncedSongIds: [],
+  }));
+
+  return { songs, warnings };
+}
+
+/**
+ * Import only setlists from the pedal
+ */
+export async function importSetlistsFromPedal(importAll = false): Promise<{ setlists: Setlist[]; warnings: string[] }> {
+  const bridge = await ensurePedalBridge();
+  const warnings: string[] = [];
+  const setlists: Setlist[] = [];
+  let consecutiveDefaults = 0;
+
+  const firmwareVersion = await requestFirmwareVersion(bridge).catch(() => undefined);
+
+  for (let index = 0; index < SETLIST_SLOT_COUNT; index += 1) {
+    try {
+      const nameResponse = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_SETLIST_NAME,
+        index,
+      });
+
+      if (!isHttpSuccess(nameResponse) || nameResponse.status !== "success") {
+        continue;
+      }
+
+      const songIds = await loadSetlistSongs(bridge, index, firmwareVersion);
+      const setlist = mapSetlistResponse(nameResponse, index, songIds);
+      const isDefault = setlist.entries.length === 0 && isDefaultSetlistName(setlist.name, index);
+      
+      if (!isDefault) {
+        setlists.push(setlist);
+        consecutiveDefaults = 0;
+      } else if (!importAll) {
+        consecutiveDefaults++;
+        // Stop if we've seen 3 consecutive default setlists (fewer slots)
+        if (consecutiveDefaults >= 3) {
+          break;
+        }
+      } else {
+        setlists.push(setlist);
+      }
+    } catch (error) {
+      warnings.push(`Error loading setlist ${index + 1}: ${(error as Error).message}`);
+    }
+  }
+
+  bridge.disconnect();
+
+  // Merge with existing setlists
+  useClockStore.setState((state) => ({
+    setlists,
+    unsyncedSetlistIds: [],
+  }));
+
+  return { setlists, warnings };
+}
+
+/**
+ * Import only settings from the pedal
+ */
+export async function importSettingsFromPedal(): Promise<{ warnings: string[] }> {
+  const bridge = await ensurePedalBridge();
+  const warnings: string[] = [];
+  const globalValues: Record<string, unknown> = {};
+
+  for (const key of GLOBAL_KEYS) {
+    try {
+      const response = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_GLOBAL_VAR,
+        name: key,
+      });
+
+      if (isHttpSuccess(response) && response.status === "success") {
+        globalValues[key] = normalizeGlobalValue(key, response.value);
+      } else {
+        warnings.push(`Global setting "${key}" could not be loaded.`);
+      }
+    } catch (error) {
+      warnings.push(`Error loading global setting "${key}": ${(error as Error).message}`);
+    }
+  }
+
+  const jackConfigs: Array<Record<string, unknown>> = [];
+  const JACK_COUNT = 4;
+
+  for (let jackIndex = 0; jackIndex < JACK_COUNT; jackIndex += 1) {
+    const config: Record<string, unknown> = { jack_num: jackIndex };
+
+    for (const key of JACK_PARAM_KEYS) {
+      try {
+        const response = await bridge.sendJsonCommand({
+          cmd: PedalCommand.GET_JACK_CONFIG,
+          jack: jackIndex,
+          param: key,
+        });
+
+        if (isHttpSuccess(response) && response.status === "success") {
+          config[key] = response.value;
+        }
+      } catch (error) {
+        warnings.push(`Error loading jack ${jackIndex} param "${key}": ${(error as Error).message}`);
+      }
+    }
+
+    jackConfigs.push(config);
+  }
+
+  const displayValues: Record<string, number | undefined> = {};
+
+  for (const key of DISPLAY_KEYS) {
+    try {
+      const response = await bridge.sendJsonCommand({
+        cmd: PedalCommand.GET_GLOBAL_VAR,
+        name: key,
+      });
+
+      if (isHttpSuccess(response) && response.status === "success" && typeof response.value === "number") {
+        displayValues[key] = response.value;
+      } else {
+        warnings.push(`Display setting "${key}" could not be loaded.`);
+      }
+    } catch (error) {
+      warnings.push(`Error loading display setting "${key}": ${(error as Error).message}`);
+    }
+  }
+
+  bridge.disconnect();
+
+  const globalSettings = mapGlobalSettings(globalValues, jackConfigs);
+  const displaySettings = mapDisplaySettings(displayValues);
+
+  useClockStore.setState((state) => ({
+    globalSettings: {
+      ...state.globalSettings,
+      ...globalSettings,
+    },
+    displaySettings: {
+      ...state.displaySettings,
+      ...displaySettings,
+    },
+    hasUnsyncedGlobals: false,
+    hasUnsyncedDisplay: false,
+  }));
+
+  return { warnings };
+}
 
 export async function importProjectFromPedal(
   options: ImportOptions = {},
@@ -213,6 +496,7 @@ export async function importProjectFromPedal(
 
   const songs: Song[] = [];
   const finishSongs = startTimer("Songs");
+  let consecutiveDefaultSongs = 0;
   for (let index = 0; index < SONG_SLOT_COUNT; index += 1) {
     options.onProgress?.({ stage: "songs", index, total: SONG_SLOT_COUNT });
     try {
@@ -223,7 +507,17 @@ export async function importProjectFromPedal(
 
       if (isHttpSuccess(response) && response.status === "success") {
         const song = mapSongResponse(response, index);
-        if (isSongUsed(song)) {
+        const isUsed = isSongUsed(song);
+        
+        if (isUsed) {
+          songs.push(song);
+          consecutiveDefaultSongs = 0;
+        } else if (!options.importAll) {
+          consecutiveDefaultSongs++;
+          if (consecutiveDefaultSongs >= 5) {
+            break;
+          }
+        } else {
           songs.push(song);
         }
       }
@@ -238,6 +532,7 @@ export async function importProjectFromPedal(
 
   const setlists: Setlist[] = [];
   const finishSetlists = startTimer("Setlists");
+  let consecutiveDefaultSetlists = 0;
   for (let index = 0; index < SETLIST_SLOT_COUNT; index += 1) {
     options.onProgress?.({ stage: "setlists", index, total: SETLIST_SLOT_COUNT });
     try {
@@ -252,7 +547,17 @@ export async function importProjectFromPedal(
 
       const songIds = await loadSetlistSongs(bridge, index, firmwareVersion);
       const setlist = mapSetlistResponse(nameResponse, index, songIds);
-      if (setlist.entries.length > 0 || !isDefaultSetlistName(setlist.name, index)) {
+      const isDefault = setlist.entries.length === 0 && isDefaultSetlistName(setlist.name, index);
+      
+      if (!isDefault) {
+        setlists.push(setlist);
+        consecutiveDefaultSetlists = 0;
+      } else if (!options.importAll) {
+        consecutiveDefaultSetlists++;
+        if (consecutiveDefaultSetlists >= 3) {
+          break;
+        }
+      } else {
         setlists.push(setlist);
       }
     } catch (error) {
@@ -266,6 +571,7 @@ export async function importProjectFromPedal(
 
   const macros: MidiMacro[] = [];
   const finishMacros = startTimer("MIDI macros");
+  let consecutiveDefaultMacros = 0;
   for (let index = 0; index < MACRO_SLOT_COUNT; index += 1) {
     options.onProgress?.({ stage: "macros", index, total: MACRO_SLOT_COUNT });
     try {
@@ -312,7 +618,17 @@ export async function importProjectFromPedal(
       }
 
       const macro = mapMacroResponse(nameResponse, index, steps);
-      if (macro.steps.length > 0 || !isDefaultMacroName(macro.name, index)) {
+      const isDefault = macro.steps.length === 0 && isDefaultMacroName(macro.name, index);
+      
+      if (!isDefault) {
+        macros.push(macro);
+        consecutiveDefaultMacros = 0;
+      } else if (!options.importAll) {
+        consecutiveDefaultMacros++;
+        if (consecutiveDefaultMacros >= 5) {
+          break;
+        }
+      } else {
         macros.push(macro);
       }
     } catch (error) {
@@ -329,10 +645,14 @@ export async function importProjectFromPedal(
     `Applying import: ${songs.length} song(s), ${setlists.length} setlist(s), ${macros.length} macro(s).`,
   );
 
+  // Replace command sequences with partial references where possible
+  const partials = useClockStore.getState().partials;
+  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, partials));
+
   applyImportToStore({
     firmwareVersion,
     songs,
-    macros,
+    macros: optimizedMacros,
     setlists,
     globalValues,
     displayValues,
@@ -541,27 +861,35 @@ function applyImportToStore({
   displayValues: Record<string, number | undefined>;
   jackConfigs: Array<Record<string, unknown>>;
 }) {
-  const store = useClockStore.getState();
-
   const projectName = `Pedal Import ${new Date().toLocaleDateString(undefined, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   })}`;
 
-  useClockStore.setState({
-    projectName,
-    projectVersion: firmwareVersion ?? store.projectVersion,
-    macros,
-    songs,
-    setlists,
-  });
-
   const globalSettings = mapGlobalSettings(globalValues, jackConfigs);
   const displaySettings = mapDisplaySettings(displayValues);
 
-  store.updateGlobalSettings(globalSettings);
-  store.updateDisplaySettings(displaySettings);
+  useClockStore.setState((state) => ({
+    projectName,
+    projectVersion: firmwareVersion ?? state.projectVersion,
+    macros,
+    songs,
+    setlists,
+    globalSettings: {
+      ...state.globalSettings,
+      ...globalSettings,
+    },
+    displaySettings: {
+      ...state.displaySettings,
+      ...displaySettings,
+    },
+    unsyncedSongIds: [],
+    unsyncedSetlistIds: [],
+    unsyncedMacroIds: [],
+    hasUnsyncedGlobals: false,
+    hasUnsyncedDisplay: false,
+  }));
 }
 
 function mapGlobalSettings(
@@ -697,5 +1025,82 @@ function isVersionAtLeast(current: string, target: string): boolean {
   }
 
   return true;
+}
+
+/**
+ * Compare two MIDI steps for equality (ignoring IDs)
+ */
+function stepsEqual(a: MidiStep, b: MidiStep): boolean {
+  if (a.kind !== b.kind) return false;
+  
+  switch (a.kind) {
+    case "cc":
+      return b.kind === "cc" &&
+        a.channel === b.channel &&
+        a.controller === b.controller &&
+        a.value === b.value;
+    case "pc":
+      return b.kind === "pc" &&
+        a.channel === b.channel &&
+        a.program === b.program;
+    case "custom":
+      return b.kind === "custom" &&
+        a.bytes.length === b.bytes.length &&
+        a.bytes.every((byte, i) => byte === b.bytes[i]);
+    case "partial":
+      return b.kind === "partial" && a.partialId === b.partialId;
+  }
+}
+
+/**
+ * Try to replace sequences of commands in a macro with partial references
+ */
+function replaceWithPartials(macro: MidiMacro, partials: MidiPartial[]): MidiMacro {
+  if (partials.length === 0 || macro.steps.length === 0) {
+    return macro;
+  }
+
+  const optimizedSteps: MidiStep[] = [];
+  let i = 0;
+
+  while (i < macro.steps.length) {
+    let matched = false;
+
+    // Try to match each partial against the remaining steps
+    for (const partial of partials) {
+      if (partial.commands.length === 0) continue;
+      if (i + partial.commands.length > macro.steps.length) continue;
+
+      // Check if the next N steps match this partial
+      const potentialMatch = macro.steps.slice(i, i + partial.commands.length);
+      const allMatch = potentialMatch.every((step, idx) =>
+        stepsEqual(step, partial.commands[idx])
+      );
+
+      if (allMatch) {
+        // Replace with a partial reference
+        optimizedSteps.push({
+          id: `${macro.id}-partial-${i}`,
+          kind: "partial",
+          partialId: partial.id,
+          name: partial.name,
+        });
+        i += partial.commands.length;
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      // No partial matched, keep the original step
+      optimizedSteps.push(macro.steps[i]);
+      i++;
+    }
+  }
+
+  return {
+    ...macro,
+    steps: optimizedSteps,
+  };
 }
 

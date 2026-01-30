@@ -29,12 +29,30 @@ export type MidiCustomStep = MidiStepCommon & {
   bytes: number[];
 };
 
-export type MidiStep = MidiCCStep | MidiPCStep | MidiCustomStep;
+export type MidiPartialStep = MidiStepCommon & {
+  kind: "partial";
+  partialId: string;
+  name: string; // Cached name for display
+};
+
+export type MidiStep = MidiCCStep | MidiPCStep | MidiCustomStep | MidiPartialStep;
+
+// A reusable named group of MIDI commands
+export type MidiPartial = {
+  id: string;
+  name: string;
+  description?: string;
+  commands: (MidiCCStep | MidiPCStep | MidiCustomStep)[]; // Only raw commands, no nested partials
+  deviceId?: string; // Optional - which device this is for
+  tags?: string[]; // For categorization/search
+  updatedAt: string;
+};
 
 export type MidiMacro = {
   id: string;
   name: string;
-  deviceId?: string;
+  deviceId?: string; // Deprecated: use channelDeviceMap instead
+  channelDeviceMap?: Record<MidiChannel, string>; // Maps channel number to device ID
   category?: string;
   tags?: string[];
   steps: MidiStep[];

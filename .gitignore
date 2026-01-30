@@ -40,3 +40,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 /.npm-cache
+walrus-firmware-chunk.js
+walrus-firmware-midi.js
+Canvas Clock TOFU.json
+data
+*.bin
+walrus-*

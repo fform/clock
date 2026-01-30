@@ -64,6 +64,7 @@ export type GlobalSettings = {
   midiRouting: MidiRoutingSettings;
   footswitch?: FootswitchSettings;
   jacks?: JackConfig[];
+  channelDeviceMap?: Record<number, string>; // MIDI channel (1-16) -> device ID
   raw?: Record<string, unknown>;
 };
 

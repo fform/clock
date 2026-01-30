@@ -8,15 +8,21 @@ import { MidiService, type MidiPortsSnapshot } from "./service";
  
  export function MidiProvider({ children }: { children: React.ReactNode }) {
   const service = useMemo(() => new MidiService({ sysex: true }), []);
- 
+
    useEffect(() => {
+     // Ensure we're in the browser
+     if (typeof window === "undefined") {
+       return;
+     }
+
      service
        .initialize()
        .catch((error) => {
+         // Only log as warning, don't throw - allows app to continue without MIDI
          console.warn("[MidiService] initialization failed", error);
        });
    }, [service]);
- 
+
    return (
      <MidiContext.Provider value={service}>{children}</MidiContext.Provider>
    );

@@ -4,9 +4,12 @@ import path from "path";
 
 export async function GET(
   _request: Request,
-  { params }: { params: { brand: string; model: string } },
+  context: { params: Promise<{ brand: string; model: string }> },
 ) {
   try {
+    // Await params in Next.js 15+
+    const params = await context.params;
+    
     const yamlPath = path.join(
       process.cwd(),
       "data",
@@ -26,7 +29,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error(`Failed to load template for ${params.brand}/${params.model}:`, error);
+    console.error(`Failed to load template:`, error);
     return NextResponse.json({ error: "Failed to load template" }, { status: 500 });
   }
 }

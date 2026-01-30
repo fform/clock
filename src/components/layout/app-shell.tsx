@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  ChevronDown,
   Download,
   Loader2,
   Menu,
@@ -18,9 +19,15 @@ import { NAV_ITEMS } from "@/lib/navigation";
 import { useMidiPorts } from "@/lib/midi/context";
 import type { MidiPortSummary } from "@/lib/midi/service";
 import {
+  hasUnsyncedChangesSelector,
+  hasUnsyncedDisplaySelector,
+  hasUnsyncedGlobalsSelector,
   projectNameSelector,
   projectVersionSelector,
   sidebarCollapsedSelector,
+  unsyncedMacroIdsSelector,
+  unsyncedSetlistIdsSelector,
+  unsyncedSongIdsSelector,
   useClockStore,
 } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -46,12 +53,52 @@ export function AppShell({ children }: AppShellProps) {
   const toggleSidebar = useClockStore((state) => state.toggleSidebar);
   const connectedOutputId = useClockStore((state) => state.connectedOutputId);
   const setConnectedOutput = useClockStore((state) => state.setConnectedOutput);
+  const unsyncedSongIds = useClockStore(unsyncedSongIdsSelector);
+  const unsyncedSetlistIds = useClockStore(unsyncedSetlistIdsSelector);
+  const unsyncedMacroIds = useClockStore(unsyncedMacroIdsSelector);
+  const hasUnsyncedGlobals = useClockStore(hasUnsyncedGlobalsSelector);
+  const hasUnsyncedDisplay = useClockStore(hasUnsyncedDisplaySelector);
+  const hasUnsyncedChanges = useClockStore(hasUnsyncedChangesSelector);
   const midiPorts = useMidiPorts();
   const [isImporting, setIsImporting] = useState(false);
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importWarning, setImportWarning] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [showImportMenu, setShowImportMenu] = useState(false);
+  const importMenuRef = useRef<HTMLDivElement>(null);
+
+  const unsyncedSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (unsyncedSongIds.length) {
+      parts.push(
+        `${unsyncedSongIds.length} song${unsyncedSongIds.length === 1 ? "" : "s"}`,
+      );
+    }
+    if (unsyncedSetlistIds.length) {
+      parts.push(
+        `${unsyncedSetlistIds.length} setlist${unsyncedSetlistIds.length === 1 ? "" : "s"}`,
+      );
+    }
+    if (unsyncedMacroIds.length) {
+      parts.push(
+        `${unsyncedMacroIds.length} macro${unsyncedMacroIds.length === 1 ? "" : "s"}`,
+      );
+    }
+    if (hasUnsyncedGlobals) {
+      parts.push("global settings");
+    }
+    if (hasUnsyncedDisplay) {
+      parts.push("display settings");
+    }
+    return parts.join(", ");
+  }, [
+    unsyncedSongIds.length,
+    unsyncedSetlistIds.length,
+    unsyncedMacroIds.length,
+    hasUnsyncedGlobals,
+    hasUnsyncedDisplay,
+  ]);
 
   const canvasOutput = useMemo<MidiPortSummary | undefined>(() => {
     if (!midiPorts?.outputs.length) {
@@ -142,7 +189,7 @@ export function AppShell({ children }: AppShellProps) {
     }
   }, []);
 
-  const handleImport = useCallback(async () => {
+  const handleImport = useCallback(async (importAll = false) => {
     if (isImporting) return;
     setIsImporting(true);
     setProgressLabel("Connecting to pedal...");
@@ -152,6 +199,7 @@ export function AppShell({ children }: AppShellProps) {
 
     try {
       const result = await importProjectFromPedal({
+        importAll,
         onProgress: (progress) => {
           setProgressLabel(describeProgress(progress));
         },
@@ -186,7 +234,7 @@ export function AppShell({ children }: AppShellProps) {
       >
         <div className="flex w-full flex-col gap-6 p-4">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium uppercase tracking-widest text-on-muted">
+            <span className="text-xs font-medium text-on-muted">
               Navigate
             </span>
             <button
@@ -256,7 +304,7 @@ export function AppShell({ children }: AppShellProps) {
               <p className="font-display text-lg font-semibold text-on-surface">
                 {projectName}
               </p>
-              <p className="text-xs uppercase tracking-[0.2em] text-on-muted">
+              <p className="text-xs text-on-muted">
                 Project version {projectVersion}
               </p>
               <div className="mt-2 flex items-center gap-2 text-xs">
@@ -288,26 +336,74 @@ export function AppShell({ children }: AppShellProps) {
               {importError ? (
                 <p className="text-xs text-danger">{importError}</p>
               ) : null}
+              <p
+                className={cn(
+                  "text-xs",
+                  hasUnsyncedChanges ? "text-warning" : "text-on-muted",
+                )}
+              >
+                {hasUnsyncedChanges
+                  ? `Unsynced changes: ${unsyncedSummary}`
+                  : "All changes are synced with your pedal."}
+              </p>
             </div>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={
-                isImporting ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                ) : (
-                  <Download className="size-4" aria-hidden />
-                )
-              }
-              onClick={handleImport}
-              disabled={isImporting}
-            >
-              {isImporting ? "Importing..." : "Import from pedal"}
-            </Button>
+            <div className="relative" ref={importMenuRef}>
+              <div className="flex gap-0.5">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={
+                    isImporting ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden />
+                    ) : (
+                      <Download className="size-4" aria-hidden />
+                    )
+                  }
+                  onClick={() => handleImport(false)}
+                  disabled={isImporting}
+                  className="rounded-r-none"
+                >
+                  {isImporting ? "Importing..." : "Import from pedal"}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<ChevronDown className="size-3" />}
+                  onClick={() => setShowImportMenu(!showImportMenu)}
+                  disabled={isImporting}
+                  className="rounded-l-none border-l-0 px-2"
+                />
+              </div>
+              {showImportMenu && (
+                <div className="absolute right-0 top-full z-10 mt-1 w-52 rounded-lg border border-border/60 bg-surface shadow-lg">
+                  <button
+                    onClick={() => {
+                      handleImport(false);
+                      setShowImportMenu(false);
+                    }}
+                    disabled={isImporting}
+                    className="w-full px-3 py-2 text-left text-sm text-on-surface hover:bg-surface-subtle disabled:opacity-50"
+                  >
+                    Import Configured
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleImport(true);
+                      setShowImportMenu(false);
+                    }}
+                    disabled={isImporting}
+                    className="w-full px-3 py-2 text-left text-sm text-on-surface hover:bg-surface-subtle disabled:opacity-50"
+                  >
+                    Import Everything
+                  </button>
+                </div>
+              )}
+            </div>
             <Button
               variant="outline"
               size="sm"
               icon={<SendHorizonal className="size-4" aria-hidden />}
+              disabled={!hasUnsyncedChanges}
             >
               Send everything to pedal
             </Button>
