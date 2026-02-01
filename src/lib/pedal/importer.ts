@@ -30,6 +30,9 @@ import type {
   MidiMacroInstance,
   MidiStep,
   MidiPartial,
+  MidiCCStep,
+  MidiPCStep,
+  MidiCustomStep,
 } from "@/lib/domain/midi";
 import type { Setlist, Song, TimeSignature } from "@/lib/domain/project";
 import type { DisplaySettings, GlobalSettings } from "@/lib/domain/settings";
@@ -178,13 +181,23 @@ export async function importMacrosFromPedal(importAll = false): Promise<{ macros
 
   bridge.disconnect();
 
+  // Get existing partials
+  const existingPartials = useClockStore.getState().partials;
+  
+  // Auto-detect common sequences and create new partials
+  const detectedPartials = detectCommonSequences(macros, existingPartials);
+  logDebug(`Detected ${detectedPartials.length} common sequence(s) across macros`);
+  
+  // Combine existing and detected partials
+  const allPartials = [...existingPartials, ...detectedPartials];
+  
   // Replace command sequences with partial references where possible
-  const partials = useClockStore.getState().partials;
-  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, partials));
+  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, allPartials));
 
-  // Merge with existing macros
+  // Update store with optimized macros and new partials
   useClockStore.setState((state) => ({
     macros: optimizedMacros,
+    partials: allPartials,
     unsyncedMacroIds: [],
   }));
 
@@ -645,9 +658,18 @@ export async function importProjectFromPedal(
     `Applying import: ${songs.length} song(s), ${setlists.length} setlist(s), ${macros.length} macro(s).`,
   );
 
+  // Get existing partials
+  const existingPartials = useClockStore.getState().partials;
+  
+  // Auto-detect common sequences and create new partials
+  const detectedPartials = detectCommonSequences(macros, existingPartials);
+  logDebug(`Detected ${detectedPartials.length} common sequence(s) across macros`);
+  
+  // Combine existing and detected partials
+  const allPartials = [...existingPartials, ...detectedPartials];
+  
   // Replace command sequences with partial references where possible
-  const partials = useClockStore.getState().partials;
-  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, partials));
+  const optimizedMacros = macros.map((macro) => replaceWithPartials(macro, allPartials));
 
   applyImportToStore({
     firmwareVersion,
@@ -657,6 +679,7 @@ export async function importProjectFromPedal(
     globalValues,
     displayValues,
     jackConfigs,
+    partials: allPartials,
   });
 
   finishImport();
@@ -852,6 +875,7 @@ function applyImportToStore({
   globalValues,
   displayValues,
   jackConfigs,
+  partials,
 }: {
   firmwareVersion?: string;
   songs: Song[];
@@ -860,6 +884,7 @@ function applyImportToStore({
   globalValues: Record<string, unknown>;
   displayValues: Record<string, number | undefined>;
   jackConfigs: Array<Record<string, unknown>>;
+  partials: MidiPartial[];
 }) {
   const projectName = `Pedal Import ${new Date().toLocaleDateString(undefined, {
     year: "numeric",
@@ -874,6 +899,7 @@ function applyImportToStore({
     projectName,
     projectVersion: firmwareVersion ?? state.projectVersion,
     macros,
+    partials,
     songs,
     setlists,
     globalSettings: {
@@ -1053,12 +1079,267 @@ function stepsEqual(a: MidiStep, b: MidiStep): boolean {
 }
 
 /**
+ * Create a hash key for a sequence of commands (for detecting duplicates)
+ */
+function hashCommandSequence(commands: MidiStep[]): string {
+  return commands.map(cmd => {
+    if (cmd.kind === "cc") {
+      return `cc:${cmd.channel}:${cmd.controller}:${cmd.value}`;
+    } else if (cmd.kind === "pc") {
+      return `pc:${cmd.channel}:${cmd.program}`;
+    } else if (cmd.kind === "custom") {
+      return `custom:${cmd.bytes.join(",")}`;
+    }
+    return "";
+  }).join("|");
+}
+
+/**
+ * Auto-detect common command sequences across macros and create partials
+ * Returns an array of detected partials
+ */
+function detectCommonSequences(macros: MidiMacro[], existingPartials: MidiPartial[]): MidiPartial[] {
+  const MIN_SEQUENCE_LENGTH = 2;
+  const MIN_OCCURRENCES = 2;
+  
+  // Map: sequence hash -> { commands, occurrences }
+  const sequenceCounts = new Map<string, { commands: MidiStep[], count: number, maxLength: number }>();
+  
+  // Extract all possible subsequences from each macro (only non-partial commands)
+  for (const macro of macros) {
+    // Filter out any existing partial references
+    const rawCommands = macro.steps.filter(step => step.kind !== "partial") as (MidiCCStep | MidiPCStep | MidiCustomStep)[];
+    
+    if (rawCommands.length < MIN_SEQUENCE_LENGTH) continue;
+    
+    // Try all possible subsequences starting from each position
+    for (let start = 0; start < rawCommands.length; start++) {
+      for (let length = MIN_SEQUENCE_LENGTH; length <= rawCommands.length - start; length++) {
+        const sequence = rawCommands.slice(start, start + length);
+        const hash = hashCommandSequence(sequence);
+        
+        const existing = sequenceCounts.get(hash);
+        if (existing) {
+          existing.count++;
+          existing.maxLength = Math.max(existing.maxLength, length);
+        } else {
+          sequenceCounts.set(hash, { commands: sequence, count: 1, maxLength: length });
+        }
+      }
+    }
+  }
+  
+  // Filter to sequences that appear multiple times
+  const commonSequences = Array.from(sequenceCounts.entries())
+    .filter(([_, data]) => data.count >= MIN_OCCURRENCES)
+    .map(([hash, data]) => ({ hash, ...data }))
+    .sort((a, b) => {
+      // Sort by: longer sequences first, then by occurrence count
+      if (a.maxLength !== b.maxLength) return b.maxLength - a.maxLength;
+      return b.count - a.count;
+    });
+  
+  // Greedily select non-overlapping sequences (prefer longer, more common ones)
+  const selectedSequences: { commands: MidiStep[], count: number }[] = [];
+  const usedHashes = new Set<string>();
+  
+  for (const seq of commonSequences) {
+    // Check if this sequence conflicts with any existing partial
+    const conflictsWithExisting = existingPartials.some(partial => {
+      if (partial.commands.length === 0) return false;
+      
+      // Check if the existing partial is a subsequence of this detected sequence
+      for (let i = 0; i <= seq.commands.length - partial.commands.length; i++) {
+        const potentialMatch = seq.commands.slice(i, i + partial.commands.length);
+        if (potentialMatch.every((cmd, idx) => stepsEqual(cmd, partial.commands[idx]))) {
+          return true; // Conflict found
+        }
+      }
+      return false;
+    });
+    
+    if (conflictsWithExisting) {
+      // Skip this sequence - it conflicts with an existing partial
+      continue;
+    }
+    
+    // Check if this sequence is a subset of an already selected sequence
+    let isSubset = false;
+    
+    for (const selected of selectedSequences) {
+      if (selected.commands.length < seq.commands.length) continue;
+      
+      // Check if seq.commands is a subsequence of selected.commands
+      for (let i = 0; i <= selected.commands.length - seq.commands.length; i++) {
+        const potentialMatch = selected.commands.slice(i, i + seq.commands.length);
+        if (potentialMatch.every((cmd, idx) => stepsEqual(cmd, seq.commands[idx]))) {
+          isSubset = true;
+          break;
+        }
+      }
+      
+      if (isSubset) break;
+    }
+    
+    if (!isSubset && !usedHashes.has(seq.hash)) {
+      selectedSequences.push({ commands: seq.commands, count: seq.count });
+      usedHashes.add(seq.hash);
+    }
+  }
+  
+  // Extract common prefixes/suffixes from similar sequences
+  const extractedSequences = extractCommonParts(selectedSequences, existingPartials);
+  
+  // Create partials from selected sequences
+  const detectedPartials: MidiPartial[] = extractedSequences.map((seq, index) => ({
+    id: `partial-detected-${Date.now().toString(36)}-${index}`,
+    name: `Unknown ${index + 1}`,
+    description: `Auto-detected sequence (found ${seq.count} times)`,
+    commands: seq.commands as (MidiCCStep | MidiPCStep | MidiCustomStep)[],
+    updatedAt: new Date().toISOString(),
+  }));
+  
+  return detectedPartials;
+}
+
+/**
+ * Find common prefixes/suffixes in sequences and extract them
+ * This handles cases where two sequences differ by only one command
+ */
+function extractCommonParts(
+  sequences: { commands: MidiStep[], count: number }[],
+  existingPartials: MidiPartial[]
+): { commands: MidiStep[], count: number }[] {
+  const MIN_SEQUENCE_LENGTH = 2;
+  const extracted = new Map<string, { commands: MidiStep[], count: number }>();
+  const toRemove = new Set<string>();
+  
+  // Compare each pair of sequences
+  for (let i = 0; i < sequences.length; i++) {
+    for (let j = i + 1; j < sequences.length; j++) {
+      const seq1 = sequences[i];
+      const seq2 = sequences[j];
+      
+      // Find common prefix
+      let prefixLen = 0;
+      const minLen = Math.min(seq1.commands.length, seq2.commands.length);
+      while (prefixLen < minLen && stepsEqual(seq1.commands[prefixLen], seq2.commands[prefixLen])) {
+        prefixLen++;
+      }
+      
+      // Find common suffix
+      let suffixLen = 0;
+      while (
+        suffixLen < minLen - prefixLen &&
+        stepsEqual(
+          seq1.commands[seq1.commands.length - 1 - suffixLen],
+          seq2.commands[seq2.commands.length - 1 - suffixLen]
+        )
+      ) {
+        suffixLen++;
+      }
+      
+      // If there's a common prefix of at least MIN_SEQUENCE_LENGTH
+      if (prefixLen >= MIN_SEQUENCE_LENGTH) {
+        const prefix = seq1.commands.slice(0, prefixLen);
+        const prefixHash = hashCommandSequence(prefix);
+        const prefixCount = seq1.count + seq2.count;
+        
+        // Check if this prefix conflicts with existing partials
+        const conflictsWithExisting = existingPartials.some(partial => {
+          if (partial.commands.length === 0) return false;
+          
+          // Check if the existing partial is a subsequence of this prefix
+          for (let k = 0; k <= prefix.length - partial.commands.length; k++) {
+            const potentialMatch = prefix.slice(k, k + partial.commands.length);
+            if (potentialMatch.every((cmd, idx) => stepsEqual(cmd, partial.commands[idx]))) {
+              return true; // Conflict found
+            }
+          }
+          return false;
+        });
+        
+        if (!conflictsWithExisting) {
+          const existing = extracted.get(prefixHash);
+          if (!existing || existing.count < prefixCount) {
+            extracted.set(prefixHash, { commands: prefix, count: prefixCount });
+          }
+          
+          // Mark longer sequences for potential removal
+          toRemove.add(hashCommandSequence(seq1.commands));
+          toRemove.add(hashCommandSequence(seq2.commands));
+        }
+      }
+      
+      // If there's a common suffix of at least MIN_SEQUENCE_LENGTH
+      if (suffixLen >= MIN_SEQUENCE_LENGTH && suffixLen !== prefixLen) {
+        const suffix = seq1.commands.slice(-suffixLen);
+        const suffixHash = hashCommandSequence(suffix);
+        const suffixCount = seq1.count + seq2.count;
+        
+        // Check if this suffix conflicts with existing partials
+        const conflictsWithExisting = existingPartials.some(partial => {
+          if (partial.commands.length === 0) return false;
+          
+          // Check if the existing partial is a subsequence of this suffix
+          for (let k = 0; k <= suffix.length - partial.commands.length; k++) {
+            const potentialMatch = suffix.slice(k, k + partial.commands.length);
+            if (potentialMatch.every((cmd, idx) => stepsEqual(cmd, partial.commands[idx]))) {
+              return true; // Conflict found
+            }
+          }
+          return false;
+        });
+        
+        if (!conflictsWithExisting) {
+          const existing = extracted.get(suffixHash);
+          if (!existing || existing.count < suffixCount) {
+            extracted.set(suffixHash, { commands: suffix, count: suffixCount });
+          }
+          
+          // Mark longer sequences for potential removal
+          toRemove.add(hashCommandSequence(seq1.commands));
+          toRemove.add(hashCommandSequence(seq2.commands));
+        }
+      }
+    }
+  }
+  
+  // Keep original sequences that weren't broken down
+  const result: { commands: MidiStep[], count: number }[] = [];
+  for (const seq of sequences) {
+    const hash = hashCommandSequence(seq.commands);
+    if (!toRemove.has(hash)) {
+      result.push(seq);
+    }
+  }
+  
+  // Add extracted common parts
+  for (const [_, seq] of extracted) {
+    result.push(seq);
+  }
+  
+  // Sort by length (longer first) and count
+  result.sort((a, b) => {
+    if (a.commands.length !== b.commands.length) {
+      return b.commands.length - a.commands.length;
+    }
+    return b.count - a.count;
+  });
+  
+  return result;
+}
+
+/**
  * Try to replace sequences of commands in a macro with partial references
  */
 function replaceWithPartials(macro: MidiMacro, partials: MidiPartial[]): MidiMacro {
   if (partials.length === 0 || macro.steps.length === 0) {
     return macro;
   }
+
+  // Sort partials by command length (longest first) to match greedily
+  const sortedPartials = [...partials].sort((a, b) => b.commands.length - a.commands.length);
 
   const optimizedSteps: MidiStep[] = [];
   let i = 0;
@@ -1067,7 +1348,7 @@ function replaceWithPartials(macro: MidiMacro, partials: MidiPartial[]): MidiMac
     let matched = false;
 
     // Try to match each partial against the remaining steps
-    for (const partial of partials) {
+    for (const partial of sortedPartials) {
       if (partial.commands.length === 0) continue;
       if (i + partial.commands.length > macro.steps.length) continue;
 

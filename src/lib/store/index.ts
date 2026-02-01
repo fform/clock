@@ -469,6 +469,7 @@ export const useClockStore = create<ClockState>()(
           projectVersion: state.projectVersion,
           sidebarCollapsed: state.sidebarCollapsed,
           macros: state.macros,
+          partials: state.partials,
           songs: state.songs,
           setlists: state.setlists,
           connectedOutputId: state.connectedOutputId,

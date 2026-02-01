@@ -1,5 +1,18 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Canvas Clock - MIDI Macro Manager
+
+A web-based MIDI macro management system for the Canvas Clock pedal.
+
+### Key Features
+
+- **Songs & Setlists**: Organize your music with tempo, time signature, and MIDI macros
+- **MIDI Macros**: Create complex MIDI command sequences
+- **Partials**: Reusable MIDI command groups (auto-detected on import!)
+- **Device Templates**: Pre-configured MIDI commands for popular devices
+- **Import/Export**: Sync with your Canvas Clock pedal
+- **Auto-Detection**: Automatically detects common command sequences and creates partials
+
 ## Getting Started
 
 First, run the development server:
